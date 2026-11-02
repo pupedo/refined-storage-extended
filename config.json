@@ -1,0 +1,41 @@
+{
+  "enabled": true,
+  "dev": false,
+  "crafters": {
+    "iron":      { "slots": 27, "speed": 1,   "interval": 10, "energy": 4, "perPattern": 1 },
+    "gold":      { "slots": 45, "speed": 5,   "interval": 10, "energy": 4, "perPattern": 1 },
+    "diamond":   { "slots": 63, "speed": 25,  "interval": 10, "energy": 4, "perPattern": 1 },
+    "netherite": { "slots": 81, "speed": 125, "interval": 10, "energy": 4, "perPattern": 1 }
+  },
+  "storageBlocks": {
+    "256k": 10,
+    "1024k": 12,
+    "4096k": 14,
+    "16384k": 16
+  },
+  "requester": {
+    "interval": 70,
+    "energy": 10,
+    "maxCraftAmount": 1000,
+    "refreshMode": "poll"
+  },
+  "detector": {
+    "refreshMode": "poll"
+  },
+  "cards": {
+    "infinityUsage": 4000,
+    "dimensionUsage": 8000
+  },
+  "wirelessCraftingGrid": {
+    "capacity": 3200,
+    "openUsage": 30,
+    "extractUsage": 5,
+    "insertUsage": 5,
+    "craftUsage": 5,
+    "autocraftUsage": 10,
+    "clearUsage": 5,
+    "transferUsage": 5,
+    "noTransmitterMsg": "There is no Wireless Transmitter in the network.",
+    "transmitterUnloadedMsg": "The Wireless Transmitter is not loaded."
+  }
+}
