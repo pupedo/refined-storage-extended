@@ -13,11 +13,16 @@ var RSE_CRAFTER_OFF = [
 ];
 
 var RSE_CRAFTER_TIERS = [
-	{ name: "iron", display: "Iron Autocrafter", speed: 1, slots: 27, energy: 4, perPattern: 1 },
-	{ name: "gold", display: "Gold Autocrafter", speed: 5, slots: 45, energy: 4, perPattern: 1 },
-	{ name: "diamond", display: "Diamond Autocrafter", speed: 25, slots: 63, energy: 4, perPattern: 1 },
-	{ name: "netherite", display: "Netherite Autocrafter", speed: 125, slots: 81, energy: 4, perPattern: 1 }
+	{ name: "iron", display: "Iron Autocrafter", title: "Iron Crafter", speed: 1, slots: 27, energy: 4, perPattern: 1 },
+	{ name: "gold", display: "Gold Autocrafter", title: "Gold Crafter", speed: 5, slots: 45, energy: 4, perPattern: 1 },
+	{ name: "diamond", display: "Diamond Autocrafter", title: "Diamond Crafter", speed: 25, slots: 63, energy: 4, perPattern: 1 },
+	{ name: "netherite", display: "Netherite Autocrafter", title: "Netherite Crafter", speed: 125, slots: 81, energy: 4, perPattern: 1 }
 ];
+
+var RSE_ADVANCED_CRAFTER_LAYOUT_VERSION = 3;
+// Viewport names are UI-facing and denied server-side; real pattern slots remain slot_pattern0..80.
+var RSE_CRAFTER_UNBOUND_SLOT_NAME = "slot_pattern_unbound";
+var RSE_CRAFTER_ZERO_SOURCE = { id: 0, count: 0, data: 0 };
 
 for (var ti = 0; ti < RSE_CRAFTER_TIERS.length; ti++) {
 	var tpref = "RSE_crafter_" + RSE_CRAFTER_TIERS[ti].name + "_";
@@ -26,6 +31,19 @@ for (var ti = 0; ti < RSE_CRAFTER_TIERS.length; ti++) {
 		[tpref + "front_on", 0], [tpref + "side_left_on", 0], [tpref + "side_on", 0]
 	];
 }
+
+function getAdvancedCrafterMaxPatternSlots() {
+	var maxPatternSlots = RSE_CRAFTERS_PER_PAGE;
+	for (var crafterTierIndex = 0; crafterTierIndex < RSE_CRAFTER_TIERS.length; crafterTierIndex++) {
+		var crafterTier = RSE_CRAFTER_TIERS[crafterTierIndex];
+		var crafterConfig = (Config.crafters && Config.crafters[crafterTier.name]) || {};
+		var configuredSlots = Math.floor(Number(crafterConfig.slots || crafterTier.slots));
+		if (isFinite(configuredSlots) && configuredSlots > maxPatternSlots) maxPatternSlots = configuredSlots;
+	}
+	return maxPatternSlots;
+}
+
+var RSE_CRAFTER_MAX_PATTERN_SLOTS = getAdvancedCrafterMaxPatternSlots();
 
 function getAdvancedCrafterTexture(variation, _active, onArr) {
 	var base = _active ? onArr : RSE_CRAFTER_OFF;
@@ -96,41 +114,361 @@ function allocateCraftId(tile) {
 	return 'pattern_' + nextCraftId;
 }
 
-function updateAdvancedCrafterOutputSlots(container, content, page) {
-	if (!container) return;
-	if (!content) {
-		var uiAdapter = container.getUiAdapter && container.getUiAdapter();
-		var windowGroup = uiAdapter ? uiAdapter.getWindow() : null;
-		if (!windowGroup) return;
-		var mainWindow = windowGroup.getWindow('main');
-		if (!mainWindow || !mainWindow.isOpened()) return;
-		content = mainWindow.getContent();
-	}
-	if (!content || !content.elements) return;
-	for (var i = 0; i < RSE_CRAFTERS_PER_PAGE; i++) {
-		var outputElement = content.elements["output_pattern" + i];
-		if (!outputElement) continue;
-		var patternElement = content.elements["slot_pattern" + i];
-		if ((patternElement && (patternElement.x < 0 || patternElement.y < 0)) || outputElement.x < 0 || outputElement.y < 0) {
-			outputElement.source = null;
-			continue;
+function getAdvancedCrafterPageCount(slotsCount) {
+	var totalSlots = Math.floor(Number(slotsCount));
+	if (!isFinite(totalSlots) || totalSlots < 0) totalSlots = 0;
+	return Math.max(1, Math.ceil(totalSlots / RSE_CRAFTERS_PER_PAGE));
+}
+
+function resolveAdvancedCrafterContainer(container) {
+	if (!container) return null;
+	if (container.slots) return container;
+	if (typeof container.getParent == "function") {
+		var parentContainer = null;
+		try {
+			parentContainer = container.getParent();
+		} catch (error) {
+			parentContainer = null;
 		}
-		var patternItem = container.slots ? container.slots["slot_pattern" + i] : null;
-		if (patternItem && patternItem.id == ItemID.RSpattern && patternItem.extra) {
-			var resultString = patternItem.extra.getString('result0');
-			if (resultString) {
-				var resultParts = resultString.split(',');
-				if (resultParts.length >= 3) {
-					var resultId = parseInt(resultParts[0]);
-					if (resultId != 0 && !isNaN(resultId)) {
-						outputElement.source = { id: resultId, count: parseInt(resultParts[1] || 1), data: parseInt(resultParts[2] || 0) };
-						continue;
-					}
-				}
+		if (parentContainer && parentContainer.slots) return parentContainer;
+	}
+	return container;
+}
+
+function getAdvancedCrafterMainWindow(itemContainer) {
+	if (!itemContainer) return null;
+	var windowGroup = null;
+	if (typeof itemContainer.getWindow == "function") {
+		try {
+			windowGroup = itemContainer.getWindow();
+		} catch (error) {
+			windowGroup = null;
+		}
+	}
+	if (!windowGroup && typeof itemContainer.getUiAdapter == "function") {
+		var uiAdapter = null;
+		try {
+			uiAdapter = itemContainer.getUiAdapter();
+		} catch (error) {
+			uiAdapter = null;
+		}
+		windowGroup = uiAdapter ? uiAdapter.getWindow() : null;
+	}
+	if (!windowGroup) return null;
+	if (typeof windowGroup.getWindow == "function") return windowGroup.getWindow('main');
+	return windowGroup;
+}
+
+function resolveAdvancedCrafterUiContainer(itemContainer, mainWindow) {
+	if (mainWindow && typeof mainWindow.getContainer == "function") {
+		var mainWindowContainer = null;
+		try {
+			mainWindowContainer = mainWindow.getContainer();
+		} catch (error) {
+			mainWindowContainer = null;
+		}
+		if (mainWindowContainer && typeof mainWindowContainer.getSlotVisualImpl == "function") return mainWindowContainer;
+	}
+	if (itemContainer && typeof itemContainer.getSlotVisualImpl == "function") return itemContainer;
+	if (itemContainer && typeof itemContainer.getUiAdapter == "function") {
+		var uiAdapter = null;
+		try {
+			uiAdapter = itemContainer.getUiAdapter();
+		} catch (error) {
+			uiAdapter = null;
+		}
+		if (uiAdapter && typeof uiAdapter.getSlotVisualImpl == "function") return uiAdapter;
+	}
+	return null;
+}
+
+function getAdvancedCrafterLiveElement(liveElements, elementName) {
+	if (!liveElements) return null;
+	if (typeof liveElements.get == "function") return liveElements.get(elementName) || null;
+	return liveElements[elementName] || null;
+}
+
+function getAdvancedCrafterLiveElements(mainWindow) {
+	if (!mainWindow || typeof mainWindow.getElements != "function") return null;
+	try {
+		return mainWindow.getElements();
+	} catch (error) {
+		return null;
+	}
+}
+
+function getAdvancedCrafterSlotItem(itemContainer, slotName) {
+	if (!itemContainer) return null;
+	if (typeof itemContainer.getSlot == "function") {
+		try {
+			var slotItem = itemContainer.getSlot(slotName);
+			if (slotItem) return slotItem;
+		} catch (error) {
+			// Fall through to the plain slots map when getSlot is unavailable.
+		}
+	}
+	if (itemContainer.slots) return itemContainer.slots[slotName] || null;
+	return null;
+}
+
+function getAdvancedCrafterPatternResult(patternItem) {
+	if (!patternItem || patternItem.id != ItemID.RSpattern || !patternItem.extra) return null;
+	var resultString = patternItem.extra.getString('result0');
+	if (!resultString) return null;
+	var resultParts = resultString.split(',');
+	if (resultParts.length < 3) return null;
+	var resultId = parseInt(resultParts[0], 10);
+	if (resultId == 0 || isNaN(resultId)) return null;
+	return {
+		id: resultId,
+		count: parseInt(resultParts[1] || 1, 10),
+		data: parseInt(resultParts[2] || 0, 10)
+	};
+}
+
+function getAdvancedCrafterViewportPatternName(viewportIndex) {
+	return "slot_pattern_view" + viewportIndex;
+}
+
+function getAdvancedCrafterViewportOutputName(viewportIndex) {
+	return "output_pattern_view" + viewportIndex;
+}
+
+function getAdvancedCrafterPageText(page, pages) {
+	return Translation.translate("Page") + ": " + (page + 1) + " / " + pages;
+}
+
+function getAdvancedCrafterGridTop() {
+	var mainHeight = UI.getScreenHeight() - 60;
+	var gridHeight = RSE_CRAFTER_ROWS * RSE_CRAFTER_ROW_HEIGHT;
+	return Math.max(88, Math.floor((mainHeight - gridHeight) / 2));
+}
+
+function getAdvancedCrafterLivePosition(viewportIndex) {
+	var gridTop = getAdvancedCrafterGridTop();
+	var columnIndex = viewportIndex % RSE_CRAFTER_COLUMNS;
+	var rowIndex = Math.floor(viewportIndex / RSE_CRAFTER_COLUMNS);
+	var patternX = RSE_CRAFTER_GRID_X + columnIndex * RSE_CRAFTER_PATTERN_SIZE;
+	var outputY = gridTop + rowIndex * RSE_CRAFTER_ROW_HEIGHT;
+	return {
+		patternX: patternX,
+		patternY: outputY + RSE_CRAFTER_OUTPUT_SIZE + RSE_CRAFTER_OUTPUT_GAP,
+		outputX: patternX + (RSE_CRAFTER_PATTERN_SIZE - RSE_CRAFTER_OUTPUT_SIZE) / 2,
+		outputY: outputY
+	};
+}
+
+function getAdvancedCrafterHiddenViewportMask(content) {
+	if (!content) return 0;
+	var hiddenMask = content.rseViewportHiddenMask;
+	if (typeof hiddenMask != "number" || !isFinite(hiddenMask) || hiddenMask < 0) hiddenMask = 0;
+	return hiddenMask;
+}
+
+function isAdvancedCrafterViewportHidden(content, viewportIndex) {
+	var viewportFlag = Math.pow(2, viewportIndex);
+	return Math.floor(getAdvancedCrafterHiddenViewportMask(content) / viewportFlag) % 2 === 1;
+}
+
+function setAdvancedCrafterViewportHidden(content, viewportIndex, hidden) {
+	if (!content) return;
+	var hiddenMask = getAdvancedCrafterHiddenViewportMask(content);
+	var viewportFlag = Math.pow(2, viewportIndex);
+	var wasHidden = Math.floor(hiddenMask / viewportFlag) % 2 === 1;
+	if (wasHidden === hidden) return;
+	content.rseViewportHiddenMask = hidden ? hiddenMask + viewportFlag : hiddenMask - viewportFlag;
+}
+
+function getAdvancedCrafterOutputSource(content, viewportIndex) {
+	var outputSources = content.rseViewportOutputSources;
+	if (!outputSources || typeof outputSources.length != "number") {
+		outputSources = [];
+		content.rseViewportOutputSources = outputSources;
+	}
+	var outputSource = outputSources[viewportIndex];
+	if (!outputSource) {
+		outputSource = { id: 0, count: 0, data: 0 };
+		outputSources[viewportIndex] = outputSource;
+	}
+	return outputSource;
+}
+
+function applyAdvancedCrafterOutputSource(outputSource, patternItem) {
+	var patternResult = getAdvancedCrafterPatternResult(patternItem);
+	if (patternResult) {
+		outputSource.id = patternResult.id;
+		outputSource.count = patternResult.count;
+		outputSource.data = patternResult.data;
+		return;
+	}
+	outputSource.id = 0;
+	outputSource.count = 0;
+	outputSource.data = 0;
+}
+
+function bindAdvancedCrafterViewportPatternSlot(uiContainer, livePatternElement, patternSlotName) {
+	if (!livePatternElement) return;
+	if (uiContainer && typeof livePatternElement.setupInitialBindings == "function") {
+		livePatternElement.setupInitialBindings(uiContainer, patternSlotName);
+		return;
+	}
+	if (!uiContainer || typeof uiContainer.getSlotVisualImpl != "function") {
+		RSE.log("advanced crafter viewport: no UI container for " + patternSlotName);
+		try {
+			livePatternElement.slotName = null;
+		} catch (error) {}
+		if (typeof livePatternElement.setBinding == "function") livePatternElement.setBinding("source", RSE_CRAFTER_ZERO_SOURCE);
+		return;
+	}
+	RSE.log("advanced crafter viewport: setupInitialBindings unavailable, fallback for " + patternSlotName);
+	try {
+		livePatternElement.slotName = patternSlotName;
+	} catch (error) {}
+	if (typeof livePatternElement.setBinding == "function") {
+		livePatternElement.setBinding("source", uiContainer.getSlotVisualImpl(patternSlotName));
+	}
+}
+
+function bindAdvancedCrafterViewportUnboundSlot(uiContainer, livePatternElement) {
+	if (!livePatternElement) return;
+	if (uiContainer && typeof livePatternElement.setupInitialBindings == "function") {
+		livePatternElement.setupInitialBindings(uiContainer, RSE_CRAFTER_UNBOUND_SLOT_NAME);
+	}
+	try {
+		livePatternElement.slotName = null;
+	} catch (error) {}
+	if (typeof livePatternElement.setBinding == "function") livePatternElement.setBinding("source", RSE_CRAFTER_ZERO_SOURCE);
+}
+
+function updateAdvancedCrafterViewportOutput(container, viewportIndex) {
+	var mainWindow = getAdvancedCrafterMainWindow(container);
+	if (!mainWindow || typeof mainWindow.getContent != "function") return;
+	if (typeof mainWindow.isOpened == "function" && !mainWindow.isOpened()) return;
+	var content = mainWindow.getContent();
+	if (!content || !content.elements) return;
+	if (content.rseCrafterLayoutVersion !== RSE_ADVANCED_CRAFTER_LAYOUT_VERSION) return;
+	var slotCount = Math.floor(Number(content.rsePatternSlotCount));
+	if (!isFinite(slotCount) || slotCount < 0) slotCount = 0;
+	var pageCount = getAdvancedCrafterPageCount(slotCount);
+	var pageIndex = clampAdvancedCrafterPage(content.rseCurrentPatternPage || 0, pageCount);
+	var patternSlotIndex = pageIndex * RSE_CRAFTERS_PER_PAGE + viewportIndex;
+	var itemContainer = resolveAdvancedCrafterContainer(container);
+	var patternItem = patternSlotIndex < slotCount ? getAdvancedCrafterSlotItem(itemContainer, "slot_pattern" + patternSlotIndex) : null;
+	var outputSource = getAdvancedCrafterOutputSource(content, viewportIndex);
+	applyAdvancedCrafterOutputSource(outputSource, patternItem);
+	var liveOutputElement = getAdvancedCrafterLiveElement(getAdvancedCrafterLiveElements(mainWindow), getAdvancedCrafterViewportOutputName(viewportIndex));
+	if (liveOutputElement && typeof liveOutputElement.setBinding == "function") {
+		liveOutputElement.setBinding("source", outputSource);
+	}
+}
+
+function createAdvancedCrafterPatternChangeHandler(viewportIndex) {
+	return function (container) {
+		updateAdvancedCrafterViewportOutput(container, viewportIndex);
+	};
+}
+
+function applyAdvancedCrafterLivePositions(mainWindow, content) {
+	var liveElements = getAdvancedCrafterLiveElements(mainWindow);
+	if (!liveElements) return;
+	for (var viewportIndex = 0; viewportIndex < RSE_CRAFTERS_PER_PAGE; viewportIndex++) {
+		var livePosition = getAdvancedCrafterLivePosition(viewportIndex);
+		var livePatternElement = getAdvancedCrafterLiveElement(liveElements, getAdvancedCrafterViewportPatternName(viewportIndex));
+		if (livePatternElement && typeof livePatternElement.setPosition == "function") {
+			livePatternElement.setPosition(livePosition.patternX, livePosition.patternY);
+		}
+		var liveOutputElement = getAdvancedCrafterLiveElement(liveElements, getAdvancedCrafterViewportOutputName(viewportIndex));
+		if (liveOutputElement && typeof liveOutputElement.setPosition == "function") {
+			liveOutputElement.setPosition(livePosition.outputX, livePosition.outputY);
+		}
+	}
+	if (content) content.rseViewportHiddenMask = 0;
+}
+
+function applyAdvancedCrafterViewportVisibility(mainWindow, content, page, slotsCount) {
+	if (!content) return;
+	var totalSlots = Math.floor(Number(slotsCount));
+	if (!isFinite(totalSlots) || totalSlots < 0) totalSlots = 0;
+	var totalPages = getAdvancedCrafterPageCount(totalSlots);
+	var pageIndex = clampAdvancedCrafterPage(page, totalPages);
+	var visibleCount = getAdvancedCrafterVisibleCount(pageIndex, totalSlots);
+	var liveElements = getAdvancedCrafterLiveElements(mainWindow);
+	if (!liveElements) return;
+	for (var viewportIndex = 0; viewportIndex < RSE_CRAFTERS_PER_PAGE; viewportIndex++) {
+		var shouldHide = viewportIndex >= visibleCount;
+		if (isAdvancedCrafterViewportHidden(content, viewportIndex) === shouldHide) continue;
+		var livePatternElement = getAdvancedCrafterLiveElement(liveElements, getAdvancedCrafterViewportPatternName(viewportIndex));
+		var liveOutputElement = getAdvancedCrafterLiveElement(liveElements, getAdvancedCrafterViewportOutputName(viewportIndex));
+		if (shouldHide) {
+			if (livePatternElement && typeof livePatternElement.setPosition == "function") livePatternElement.setPosition(-1000, -1000);
+			if (liveOutputElement && typeof liveOutputElement.setPosition == "function") liveOutputElement.setPosition(-1000, -1000);
+		} else {
+			var livePosition = getAdvancedCrafterLivePosition(viewportIndex);
+			if (livePatternElement && typeof livePatternElement.setPosition == "function") {
+				livePatternElement.setPosition(livePosition.patternX, livePosition.patternY);
+			}
+			if (liveOutputElement && typeof liveOutputElement.setPosition == "function") {
+				liveOutputElement.setPosition(livePosition.outputX, livePosition.outputY);
 			}
 		}
-		outputElement.source = null;
+		setAdvancedCrafterViewportHidden(content, viewportIndex, shouldHide);
 	}
+}
+
+function applyAdvancedCrafterViewportPage(itemContainer, mainWindow, content, page, slotsCount) {
+	if (!content || !content.elements) return false;
+	var totalSlots = Math.floor(Number(slotsCount));
+	if (!isFinite(totalSlots) || totalSlots < 0) totalSlots = 0;
+	var totalPages = getAdvancedCrafterPageCount(totalSlots);
+	var pageIndex = clampAdvancedCrafterPage(page, totalPages);
+	content.rseCurrentPatternPage = pageIndex;
+
+	var uiContainer = resolveAdvancedCrafterUiContainer(itemContainer, mainWindow);
+	var resolvedItemContainer = resolveAdvancedCrafterContainer(itemContainer);
+	if (!resolvedItemContainer && uiContainer) resolvedItemContainer = resolveAdvancedCrafterContainer(uiContainer);
+	var liveElements = getAdvancedCrafterLiveElements(mainWindow);
+
+	for (var viewportIndex = 0; viewportIndex < RSE_CRAFTERS_PER_PAGE; viewportIndex++) {
+		var patternSlotIndex = pageIndex * RSE_CRAFTERS_PER_PAGE + viewportIndex;
+		var patternSlotName = "slot_pattern" + patternSlotIndex;
+		var livePatternElement = getAdvancedCrafterLiveElement(liveElements, getAdvancedCrafterViewportPatternName(viewportIndex));
+		if (livePatternElement) {
+			if (patternSlotIndex < totalSlots) {
+				bindAdvancedCrafterViewportPatternSlot(uiContainer, livePatternElement, patternSlotName);
+			} else {
+				bindAdvancedCrafterViewportUnboundSlot(uiContainer, livePatternElement);
+			}
+		}
+		var liveOutputElement = getAdvancedCrafterLiveElement(liveElements, getAdvancedCrafterViewportOutputName(viewportIndex));
+		if (liveOutputElement) {
+			var patternItem = patternSlotIndex < totalSlots ? getAdvancedCrafterSlotItem(resolvedItemContainer, patternSlotName) : null;
+			var outputSource = getAdvancedCrafterOutputSource(content, viewportIndex);
+			applyAdvancedCrafterOutputSource(outputSource, patternItem);
+			if (typeof liveOutputElement.setBinding == "function") liveOutputElement.setBinding("source", outputSource);
+		}
+	}
+
+	var livePageTextElement = getAdvancedCrafterLiveElement(liveElements, "page_text");
+	if (livePageTextElement && typeof livePageTextElement.setBinding == "function") {
+		livePageTextElement.setBinding("text", getAdvancedCrafterPageText(pageIndex, totalPages));
+	}
+	applyAdvancedCrafterViewportVisibility(mainWindow, content, pageIndex, totalSlots);
+	return true;
+}
+
+function hasAdvancedCrafterStaticLayout(content) {
+	if (!content || !content.elements) return false;
+	for (var viewportIndex = 0; viewportIndex < RSE_CRAFTERS_PER_PAGE; viewportIndex++) {
+		var patternElementName = getAdvancedCrafterViewportPatternName(viewportIndex);
+		var outputElementName = getAdvancedCrafterViewportOutputName(viewportIndex);
+		var patternElement = content.elements[patternElementName];
+		if (!patternElement || patternElement.type != "slot" || patternElement.name != patternElementName) return false;
+		if (typeof patternElement.onItemChanged != "function") return false;
+		var outputElement = content.elements[outputElementName];
+		if (!outputElement || outputElement.type != "slot" || outputElement.name != outputElementName) return false;
+	}
+	var pageTextElement = content.elements["page_text"];
+	return !!pageTextElement && pageTextElement.type == "text";
 }
 
 function getAdvancedCrafterElement(content, elementName) {
@@ -158,46 +496,76 @@ function clampAdvancedCrafterPage(page, pages) {
 	return Math.max(0, Math.min(pageIndex, totalPages - 1));
 }
 
+function switchAdvancedCrafterPage(itemContainer, direction) {
+	if (!itemContainer) return false;
+	if (typeof direction != "number" || !isFinite(direction) || direction == 0) return false;
+
+	var mainWindow = getAdvancedCrafterMainWindow(itemContainer);
+	if (!mainWindow || typeof mainWindow.isOpened != "function" || !mainWindow.isOpened()) return false;
+	var content = typeof mainWindow.getContent == "function" ? mainWindow.getContent() : null;
+	if (!content || !content.elements) return false;
+	if (content.rseCrafterLayoutVersion !== RSE_ADVANCED_CRAFTER_LAYOUT_VERSION) return false;
+
+	var slotCount = Math.floor(Number(content.rsePatternSlotCount));
+	if (!isFinite(slotCount) || slotCount < 0) slotCount = 0;
+	var pageCount = getAdvancedCrafterPageCount(slotCount);
+	var currentPage = clampAdvancedCrafterPage(content.rseCurrentPatternPage || 0, pageCount);
+	var pageStep = direction > 0 ? 1 : -1;
+	var targetPage = clampAdvancedCrafterPage(currentPage + pageStep, pageCount);
+
+	if (content.rsePageSwitchBusy) {
+		content.rsePendingPage = targetPage;
+		return targetPage !== currentPage;
+	}
+	if (targetPage === currentPage) return false;
+
+	content.rsePageSwitchBusy = true;
+	content.rsePendingPage = targetPage;
+	try {
+		var pendingPage = content.rsePendingPage;
+		while (pendingPage !== null && pendingPage !== undefined) {
+			content.rsePendingPage = null;
+			applyAdvancedCrafterViewportPage(itemContainer, mainWindow, content, pendingPage, slotCount);
+			pendingPage = content.rsePendingPage;
+		}
+	} finally {
+		content.rsePageSwitchBusy = false;
+		content.rsePendingPage = null;
+	}
+	return true;
+}
+
 function layoutAdvancedCrafterElements(content, page, slotsCount) {
 	if (!content) return;
 	if (!content.elements) content = { elements: content };
 	var currentPage = Math.floor(Number(page));
 	if (!isFinite(currentPage) || currentPage < 0) currentPage = 0;
-	var visibleCount = getAdvancedCrafterVisibleCount(currentPage, slotsCount);
-	var mainHeight = UI.getScreenHeight() - 60;
-	var gridHeight = RSE_CRAFTER_ROWS * RSE_CRAFTER_ROW_HEIGHT;
-	var gridTop = Math.max(88, Math.floor((mainHeight - gridHeight) / 2));
-	for (var slotIndex = 0; slotIndex < RSE_CRAFTERS_PER_PAGE; slotIndex++) {
-		var columnIndex = slotIndex % RSE_CRAFTER_COLUMNS;
-		var rowIndex = Math.floor(slotIndex / RSE_CRAFTER_COLUMNS);
-		var patternElement = getAdvancedCrafterElement(content, "slot_pattern" + slotIndex);
+	var totalSlots = Math.floor(Number(slotsCount));
+	if (!isFinite(totalSlots) || totalSlots < 0) totalSlots = 0;
+	var totalPages = getAdvancedCrafterPageCount(totalSlots);
+	if (currentPage > totalPages - 1) currentPage = totalPages - 1;
+	var gridTop = getAdvancedCrafterGridTop();
+	for (var viewportIndex = 0; viewportIndex < RSE_CRAFTERS_PER_PAGE; viewportIndex++) {
+		var columnIndex = viewportIndex % RSE_CRAFTER_COLUMNS;
+		var rowIndex = Math.floor(viewportIndex / RSE_CRAFTER_COLUMNS);
+		var patternElement = getAdvancedCrafterElement(content, getAdvancedCrafterViewportPatternName(viewportIndex));
 		patternElement.type = "slot";
-		patternElement.num = slotIndex;
-		patternElement.name = "slot_pattern" + slotIndex;
+		patternElement.num = viewportIndex;
+		patternElement.name = getAdvancedCrafterViewportPatternName(viewportIndex);
 		patternElement.size = RSE_CRAFTER_PATTERN_SIZE;
 		patternElement.maxStackSize = 1;
-		if (typeof patternElement.onItemChanged != "function") {
-			patternElement.onItemChanged = function (container) {
-				updateAdvancedCrafterOutputSlots(container);
-			};
-		}
-		var outputElement = getAdvancedCrafterElement(content, "output_pattern" + slotIndex);
+		patternElement.x = RSE_CRAFTER_GRID_X + columnIndex * RSE_CRAFTER_PATTERN_SIZE;
+		patternElement.y = gridTop + rowIndex * RSE_CRAFTER_ROW_HEIGHT + RSE_CRAFTER_OUTPUT_SIZE + RSE_CRAFTER_OUTPUT_GAP;
+		patternElement.onItemChanged = createAdvancedCrafterPatternChangeHandler(viewportIndex);
+		var outputElement = getAdvancedCrafterElement(content, getAdvancedCrafterViewportOutputName(viewportIndex));
 		outputElement.type = "slot";
-		outputElement.num = slotIndex;
+		outputElement.num = viewportIndex;
+		outputElement.name = getAdvancedCrafterViewportOutputName(viewportIndex);
 		outputElement.size = RSE_CRAFTER_OUTPUT_SIZE;
 		outputElement.visual = true;
 		outputElement.bitmap = "empty";
-		if (slotIndex < visibleCount) {
-			patternElement.x = RSE_CRAFTER_GRID_X + columnIndex * RSE_CRAFTER_PATTERN_SIZE;
-			patternElement.y = gridTop + rowIndex * RSE_CRAFTER_ROW_HEIGHT + RSE_CRAFTER_OUTPUT_SIZE + RSE_CRAFTER_OUTPUT_GAP;
-			outputElement.x = patternElement.x + (RSE_CRAFTER_PATTERN_SIZE - RSE_CRAFTER_OUTPUT_SIZE) / 2;
-			outputElement.y = gridTop + rowIndex * RSE_CRAFTER_ROW_HEIGHT;
-		} else {
-			patternElement.x = -1000;
-			patternElement.y = -1000;
-			outputElement.x = -1000;
-			outputElement.y = -1000;
-		}
+		outputElement.x = patternElement.x + (RSE_CRAFTER_PATTERN_SIZE - RSE_CRAFTER_OUTPUT_SIZE) / 2;
+		outputElement.y = gridTop + rowIndex * RSE_CRAFTER_ROW_HEIGHT;
 	}
 	var upgradesLabelElement = getAdvancedCrafterElement(content, "upgrades_label");
 	upgradesLabelElement.type = "text";
@@ -261,7 +629,7 @@ function layoutAdvancedCrafterElements(content, page, slotsCount) {
 	pageTextElement.font = pageTextElement.font || {};
 	pageTextElement.font.size = 18;
 	pageTextElement.font.color = android.graphics.Color.WHITE;
-	if (typeof pageTextElement.text != "string") pageTextElement.text = "";
+	pageTextElement.text = getAdvancedCrafterPageText(currentPage, totalPages);
 	var pagePrevElement = getAdvancedCrafterElement(content, "page_prev");
 	pagePrevElement.type = "button";
 	pagePrevElement.x = 820;
@@ -272,7 +640,7 @@ function layoutAdvancedCrafterElements(content, page, slotsCount) {
 	if (!pagePrevElement.clicker) {
 		pagePrevElement.clicker = {
 			onClick: function (itemContainerUiHandler, itemContainer, element) {
-				itemContainer.sendEvent("switchPatternPage", { dir: -1 });
+				switchAdvancedCrafterPage(itemContainer, -1);
 			},
 			onLongClick: function (itemContainerUiHandler, itemContainer, element) {}
 		};
@@ -287,7 +655,7 @@ function layoutAdvancedCrafterElements(content, page, slotsCount) {
 	if (!pageNextElement.clicker) {
 		pageNextElement.clicker = {
 			onClick: function (itemContainerUiHandler, itemContainer, element) {
-				itemContainer.sendEvent("switchPatternPage", { dir: 1 });
+				switchAdvancedCrafterPage(itemContainer, 1);
 			},
 			onLongClick: function (itemContainerUiHandler, itemContainer, element) {}
 		};
@@ -308,18 +676,200 @@ function layoutAdvancedCrafterElements(content, page, slotsCount) {
 	pageNextGlyphElement.z = 100;
 }
 
+function RSE_migrateAdvancedCrafterLayout(tile, slotsCount, pages) {
+	if (!tile || !tile.data || !tile.container) return false;
+
+	var data = tile.data;
+	if (data.layoutVersion === RSE_ADVANCED_CRAFTER_LAYOUT_VERSION) return true;
+	if (data.layoutVersion !== 1 && data.layoutVersion !== 2) {
+		RSE.log("advanced crafter migration blocked: unsupported layout version " + data.layoutVersion);
+		return false;
+	}
+
+	var container = tile.container;
+	var validSlotCount = Math.floor(Number(slotsCount));
+	if (!isFinite(validSlotCount) || validSlotCount < 0) validSlotCount = 0;
+	var isVersionOne = data.layoutVersion === 1;
+	var oldPageSize = isVersionOne ? 9 : RSE_CRAFTERS_PER_PAGE;
+	var oldPageCount = Math.max(1, Math.ceil(validSlotCount / oldPageSize));
+	var migrationPage = isVersionOne
+		? clampAdvancedCrafterPage(data.page, oldPageCount)
+		: clampAdvancedCrafterPage(data.page, pages);
+	var patternIndex;
+	var targetPatternIndex;
+	var sourcePatternName;
+
+	for (patternIndex = 0; patternIndex < oldPageSize; patternIndex++) {
+		targetPatternIndex = migrationPage * oldPageSize + patternIndex;
+		if (targetPatternIndex < validSlotCount) continue;
+		sourcePatternName = "slot_pattern" + patternIndex;
+		if (container.slots) {
+			if (!container.slots[sourcePatternName]) continue;
+			var outOfRangePatternItem = container.getSlot(sourcePatternName);
+			if (outOfRangePatternItem && outOfRangePatternItem.id) {
+				RSE.log("advanced crafter migration blocked: " + sourcePatternName + " targets an out-of-range slot");
+				return false;
+			}
+		} else {
+			var fallbackPatternItem = container.getSlot(sourcePatternName);
+			if (fallbackPatternItem && fallbackPatternItem.id) {
+				RSE.log("advanced crafter migration blocked: " + sourcePatternName + " targets an out-of-range slot");
+				return false;
+			}
+		}
+	}
+
+	if (container.slots) {
+		for (var existingSlotName in container.slots) {
+			if (!Object.prototype.hasOwnProperty.call(container.slots, existingSlotName)) continue;
+			var existingStoreMatch = /^slot_store(\d+)$/.exec(existingSlotName);
+			if (!existingStoreMatch) continue;
+			var existingStoreIndex = parseInt(existingStoreMatch[1], 10);
+			if (isNaN(existingStoreIndex) || existingStoreIndex < validSlotCount) continue;
+			var outOfRangeStoreItem = container.getSlot(existingSlotName);
+			if (outOfRangeStoreItem && outOfRangeStoreItem.id) {
+				RSE.log("advanced crafter migration blocked: " + existingSlotName + " is outside the valid slot range");
+				return false;
+			}
+		}
+	} else {
+		for (var fallbackStoreIndex = validSlotCount; fallbackStoreIndex < RSE_CRAFTER_MAX_PATTERN_SLOTS; fallbackStoreIndex++) {
+			var fallbackStoreName = "slot_store" + fallbackStoreIndex;
+			var fallbackStoreItem = container.getSlot(fallbackStoreName);
+			if (fallbackStoreItem && fallbackStoreItem.id) {
+				RSE.log("advanced crafter migration blocked: " + fallbackStoreName + " is outside the valid slot range");
+				return false;
+			}
+		}
+	}
+
+	var moveSpecs = [];
+	for (patternIndex = 0; patternIndex < oldPageSize; patternIndex++) {
+		targetPatternIndex = migrationPage * oldPageSize + patternIndex;
+		if (targetPatternIndex >= validSlotCount || targetPatternIndex === patternIndex) continue;
+		moveSpecs.push({
+			source: "slot_pattern" + patternIndex,
+			target: "slot_pattern" + targetPatternIndex
+		});
+	}
+	for (var storeIndex = 0; storeIndex < validSlotCount; storeIndex++) {
+		moveSpecs.push({
+			source: "slot_store" + storeIndex,
+			target: "slot_pattern" + storeIndex
+		});
+	}
+
+	var moves = [];
+	var sourceSlots = {};
+	for (var moveSpecIndex = 0; moveSpecIndex < moveSpecs.length; moveSpecIndex++) {
+		var moveSpec = moveSpecs[moveSpecIndex];
+		if (container.slots && !container.slots[moveSpec.source]) continue;
+		var sourceItem = container.getSlot(moveSpec.source);
+		if (!sourceItem || !sourceItem.id) continue;
+		moves.push({
+			source: moveSpec.source,
+			target: moveSpec.target,
+			id: sourceItem.id,
+			count: sourceItem.count,
+			data: sourceItem.data,
+			extra: sourceItem.extra
+		});
+		sourceSlots[moveSpec.source] = true;
+	}
+
+	var targetSources = {};
+	for (var targetCheckIndex = 0; targetCheckIndex < moves.length; targetCheckIndex++) {
+		var targetCheckMove = moves[targetCheckIndex];
+		if (Object.prototype.hasOwnProperty.call(targetSources, targetCheckMove.target)) {
+			RSE.log("advanced crafter migration blocked: both " + targetSources[targetCheckMove.target] +
+				" and " + targetCheckMove.source + " target " + targetCheckMove.target);
+			return false;
+		}
+		targetSources[targetCheckMove.target] = targetCheckMove.source;
+	}
+
+	for (var occupancyCheckIndex = 0; occupancyCheckIndex < moves.length; occupancyCheckIndex++) {
+		var occupancyCheckMove = moves[occupancyCheckIndex];
+		var targetItem = null;
+		if (!container.slots || container.slots[occupancyCheckMove.target]) {
+			targetItem = container.getSlot(occupancyCheckMove.target);
+		}
+		if (targetItem && targetItem.id && !Object.prototype.hasOwnProperty.call(sourceSlots, occupancyCheckMove.target)) {
+			RSE.log("advanced crafter migration blocked: target " + occupancyCheckMove.target +
+				" is occupied by an item outside the migration sources");
+			return false;
+		}
+	}
+
+	var oldCrafts = isValidCraftsMap(data.crafts) ? data.crafts : {};
+	var newCrafts = {};
+	for (var oldSlotName in oldCrafts) {
+		if (!Object.prototype.hasOwnProperty.call(oldCrafts, oldSlotName)) continue;
+		var newSlotName = oldSlotName;
+		var visibleSlotMatch = /^slot_pattern(\d+)$/.exec(oldSlotName);
+		if (visibleSlotMatch) {
+			var visibleSlotIndex = parseInt(visibleSlotMatch[1], 10);
+			if (!isNaN(visibleSlotIndex) && visibleSlotIndex >= 0 && visibleSlotIndex < oldPageSize) {
+				newSlotName = "slot_pattern" + (migrationPage * oldPageSize + visibleSlotIndex);
+			}
+		}
+		var storeSlotMatch = /^slot_store(\d+)$/.exec(oldSlotName);
+		if (storeSlotMatch) {
+			var storedSlotIndex = parseInt(storeSlotMatch[1], 10);
+			if (!isNaN(storedSlotIndex) && storedSlotIndex >= 0) newSlotName = "slot_pattern" + storedSlotIndex;
+		}
+		var newSlotIndexMatch = /^slot_pattern(\d+)$/.exec(newSlotName);
+		if (newSlotIndexMatch) {
+			var newSlotIndex = parseInt(newSlotIndexMatch[1], 10);
+			if (isNaN(newSlotIndex) || newSlotIndex < 0 || newSlotIndex >= validSlotCount) {
+				RSE.log("advanced crafter migration blocked: craft target " + newSlotName + " is outside the valid slot range");
+				return false;
+			}
+		}
+		if (Object.prototype.hasOwnProperty.call(newCrafts, newSlotName)) {
+			RSE.log("advanced crafter migration blocked: craft target " + newSlotName + " already exists");
+			return false;
+		}
+		newCrafts[newSlotName] = oldCrafts[oldSlotName];
+	}
+
+	for (var clearIndex = 0; clearIndex < moves.length; clearIndex++) {
+		container.clearSlot(moves[clearIndex].source);
+	}
+	for (var writeIndex = 0; writeIndex < moves.length; writeIndex++) {
+		var writeMove = moves[writeIndex];
+		container.setSlot(writeMove.target, writeMove.id, writeMove.count, writeMove.data, writeMove.extra);
+	}
+
+	data.crafts = newCrafts;
+	data.patternsCount = Object.keys(newCrafts).length;
+	data.layoutVersion = RSE_ADVANCED_CRAFTER_LAYOUT_VERSION;
+	data.crafterLayoutNeedsMigration = false;
+	delete data.page;
+	if (typeof container.sendChanges == "function") container.sendChanges();
+	return true;
+}
+
 var elementsGUI_advancedCrafter = {};
 layoutAdvancedCrafterElements({ elements: elementsGUI_advancedCrafter }, 0, RSE_CRAFTERS_PER_PAGE);
 
-var advancedCrafterGUI = new UI.StandartWindow({
-	standart: {
-		header: { text: { text: Translation.translate("Crafter") } },
-		inventory: { padding: 20, width: 300 / 4 * 3 },
-		background: { standart: true }
-	},
-	drawing: [],
-	elements: elementsGUI_advancedCrafter
-});
+function createAdvancedCrafterGui(tier) {
+	return new UI.StandartWindow({
+		standart: {
+			header: { text: { text: Translation.translate(tier.title) } },
+			inventory: { padding: 20, width: 300 / 4 * 3 },
+			background: { standart: true }
+		},
+		drawing: [],
+		elements: elementsGUI_advancedCrafter
+	});
+}
+
+var advancedCrafterGUIs = {};
+for (var crafterGuiTierIndex = 0; crafterGuiTierIndex < RSE_CRAFTER_TIERS.length; crafterGuiTierIndex++) {
+	var crafterGuiTier = RSE_CRAFTER_TIERS[crafterGuiTierIndex];
+	advancedCrafterGUIs[crafterGuiTier.name] = createAdvancedCrafterGui(crafterGuiTier);
+}
 
 function RSE_crafterCraftSignature(craft) {
 	var ingredientKey = [];
@@ -367,12 +917,15 @@ function registerAdvancedCrafter(api, tier) {
 			crafts: null,
 			redstone_mode: 0,
 			redstone_power: false,
-			block_data: 0,
-			page: 0,
-			layoutVersion: 2
+			block_data: 0
 		},
 		click: function (id, count, data, coords, player, extra) {
 			if (Entity.getSneaking(player)) return false;
+			var layoutVersion = Number(this.data.layoutVersion);
+			if (!isFinite(layoutVersion) || layoutVersion !== RSE_ADVANCED_CRAFTER_LAYOUT_VERSION) {
+				RSE.log("advanced crafter click blocked: layout version " + this.data.layoutVersion + " requires " + RSE_ADVANCED_CRAFTER_LAYOUT_VERSION);
+				return true;
+			}
 			var client = Network.getClientForPlayer(player);
 			if (!client || this.container.getNetworkEntity().getClients().contains(client)) return true;
 			this.container.openFor(client, "main");
@@ -380,7 +933,7 @@ function registerAdvancedCrafter(api, tier) {
 			return true;
 		},
 		getScreenByName: function (screenName) {
-			return advancedCrafterGUI;
+			return advancedCrafterGUIs[tier.name];
 		},
 		parsePatternExtra: function (extra) {
 			if (!extra) return null;
@@ -439,63 +992,6 @@ function registerAdvancedCrafter(api, tier) {
 			if (netId == 'f') return;
 			api.crafters.unregisterPattern(netId, cts(this), craft);
 		},
-		moveCraftBetweenSlots: function (fromSlot, toSlot) {
-			if (fromSlot == toSlot) return;
-			var craft = this.data.crafts[fromSlot];
-			if (!craft) return;
-			delete this.data.crafts[fromSlot];
-			this.data.crafts[toSlot] = craft;
-		},
-		switchPageTo: function (newPage, pages) {
-			if (this.data.layoutVersion !== 2) {
-				RSE.log("advanced crafter page switch blocked: layoutVersion=" + this.data.layoutVersion + " requires migration");
-				return;
-			}
-			var oldPage = clampAdvancedCrafterPage(this.data.page, pages);
-			var targetPage = clampAdvancedCrafterPage(newPage, pages);
-			if (targetPage == oldPage) {
-				this.data.page = oldPage;
-				return;
-			}
-			var i, visibleSlotName, storeSlotName, storeSlotIndex, item;
-			for (i = 0; i < RSE_CRAFTERS_PER_PAGE; i++) {
-				storeSlotIndex = oldPage * RSE_CRAFTERS_PER_PAGE + i;
-				if (storeSlotIndex >= slotsCount) continue;
-				storeSlotName = 'slot_store' + storeSlotIndex;
-				item = this.container.getSlot(storeSlotName);
-				if (item && item.id != 0) {
-					RSE.log("advanced crafter page switch blocked: target slot " + storeSlotName + " is occupied");
-					return;
-				}
-			}
-			for (i = 0; i < RSE_CRAFTERS_PER_PAGE; i++) {
-				visibleSlotName = 'slot_pattern' + i;
-				storeSlotIndex = oldPage * RSE_CRAFTERS_PER_PAGE + i;
-				if (storeSlotIndex >= slotsCount) continue;
-				storeSlotName = 'slot_store' + storeSlotIndex;
-				item = this.container.getSlot(visibleSlotName);
-				if (item && item.id != 0) {
-					this.container.setSlot(storeSlotName, item.id, item.count, item.data, item.extra);
-					this.container.clearSlot(visibleSlotName);
-					this.moveCraftBetweenSlots(visibleSlotName, storeSlotName);
-				}
-			}
-			for (i = 0; i < RSE_CRAFTERS_PER_PAGE; i++) {
-				visibleSlotName = 'slot_pattern' + i;
-				storeSlotIndex = targetPage * RSE_CRAFTERS_PER_PAGE + i;
-				if (storeSlotIndex >= slotsCount) continue;
-				storeSlotName = 'slot_store' + storeSlotIndex;
-				item = this.container.getSlot(storeSlotName);
-				if (item && item.id != 0) {
-					this.container.setSlot(visibleSlotName, item.id, item.count, item.data, item.extra);
-					this.container.clearSlot(storeSlotName);
-					this.moveCraftBetweenSlots(storeSlotName, visibleSlotName);
-				}
-			}
-			this.data.page = targetPage;
-			this.container.sendChanges();
-			this.refreshGui();
-		},
 		post_update_network: function (net_id) {
 			var tile = this;
 			if (net_id == 'f') {
@@ -548,12 +1044,23 @@ function registerAdvancedCrafter(api, tier) {
 			var tile = this;
 			var storedLayoutVersion = tile.data.layoutVersion;
 			if (storedLayoutVersion === undefined) {
-				tile.data.layoutVersion = 1;
+				if (tile.data.createdCalled === true) {
+					tile.data.layoutVersion = RSE_ADVANCED_CRAFTER_LAYOUT_VERSION;
+					tile.data.crafterLayoutNeedsMigration = false;
+				} else {
+					tile.data.layoutVersion = 1;
+					tile.data.crafterLayoutNeedsMigration = true;
+				}
+			} else if (storedLayoutVersion === RSE_ADVANCED_CRAFTER_LAYOUT_VERSION) {
+				if (tile.data.createdCalled !== true && Object.prototype.hasOwnProperty.call(tile.data, "page")) {
+					tile.data.layoutVersion = 2;
+					tile.data.crafterLayoutNeedsMigration = true;
+				} else {
+					tile.data.crafterLayoutNeedsMigration = false;
+				}
+			} else {
 				tile.data.crafterLayoutNeedsMigration = true;
-			} else if (storedLayoutVersion === 2) {
-				tile.data.crafterLayoutNeedsMigration = false;
 			}
-			tile.data.page = clampAdvancedCrafterPage(tile.data.page, pages);
 			if (!isValidCraftsMap(tile.data.crafts)) tile.data.crafts = {};
 			var nextCraftId = tile.data.nextCraftId;
 			if (typeof nextCraftId != 'number' || !isFinite(nextCraftId) || Math.floor(nextCraftId) != nextCraftId || nextCraftId < 0) nextCraftId = 0;
@@ -573,24 +1080,29 @@ function registerAdvancedCrafter(api, tier) {
 					return 0;
 				}
 			});
-			var storeGetTransferPolicy = {
+			var storeGetDenyPolicy = {
 				transfer: function (itemContainer, slot, id, count, data, extra, player) {
 					return 0;
 				}
 			};
-			var storeSlotCount = slotsCount;
-			for (var storeSlotIndex = 0; storeSlotIndex < storeSlotCount; storeSlotIndex++) {
-				tile.container.setSlotGetTransferPolicy("slot_store" + storeSlotIndex, storeGetTransferPolicy);
+			for (var storeSlotIndex = 0; storeSlotIndex < RSE_CRAFTER_MAX_PATTERN_SLOTS; storeSlotIndex++) {
+				tile.container.setSlotGetTransferPolicy("slot_store" + storeSlotIndex, storeGetDenyPolicy);
 			}
-			var getVisiblePatternCount = function () {
-				return getAdvancedCrafterVisibleCount(tile.data.page, slotsCount);
-			};
-			for (var i = 0; i < RSE_CRAFTERS_PER_PAGE; i++) {
+			for (var patternSlotIndex = 0; patternSlotIndex < RSE_CRAFTER_MAX_PATTERN_SLOTS; patternSlotIndex++) {
 				(function (slotIndex) {
 					var slotName = "slot_pattern" + slotIndex;
+					if (slotIndex >= slotsCount) {
+						var rejectTransferPolicy = {
+							transfer: function (itemContainer, slot, id, count, data, extra, player) {
+								return 0;
+							}
+						};
+						tile.container.setSlotAddTransferPolicy(slotName, rejectTransferPolicy);
+						tile.container.setSlotGetTransferPolicy(slotName, rejectTransferPolicy);
+						return;
+					}
 					tile.container.setSlotAddTransferPolicy(slotName, {
 						transfer: function (itemContainer, slot, id, count, data, extra, player) {
-							if (slotIndex >= getVisiblePatternCount()) return 0;
 							if (id != ItemID.RSpattern || !extra) return 0;
 							var pattern = tile.parsePatternExtra(extra);
 							if (!pattern || pattern.inputs.length === 0 || pattern.outputs.length === 0) return 0;
@@ -611,15 +1123,29 @@ function registerAdvancedCrafter(api, tier) {
 					});
 					tile.container.setSlotGetTransferPolicy(slotName, {
 						transfer: function (itemContainer, slot, id, count, data, extra, player) {
-							if (slotIndex >= getVisiblePatternCount()) return 0;
 							if (id == ItemID.RSpattern && tile.data.crafts[slotName]) tile.removeCraft(slotName);
 							return count;
 						}
 					});
-				})(i);
+				})(patternSlotIndex);
 			}
+			var viewportTransferDenyPolicy = {
+				transfer: function (itemContainer, slot, id, count, data, extra, player) {
+					return 0;
+				}
+			};
+			for (var viewportIndex = 0; viewportIndex < RSE_CRAFTERS_PER_PAGE; viewportIndex++) {
+				var viewportSlotName = getAdvancedCrafterViewportPatternName(viewportIndex);
+				tile.container.setSlotAddTransferPolicy(viewportSlotName, viewportTransferDenyPolicy);
+				tile.container.setSlotGetTransferPolicy(viewportSlotName, viewportTransferDenyPolicy);
+			}
+			tile.container.setSlotAddTransferPolicy(RSE_CRAFTER_UNBOUND_SLOT_NAME, viewportTransferDenyPolicy);
+			tile.container.setSlotGetTransferPolicy(RSE_CRAFTER_UNBOUND_SLOT_NAME, viewportTransferDenyPolicy);
 		},
 		post_init: function () {
+			if (this.data.crafterLayoutNeedsMigration) {
+				RSE_migrateAdvancedCrafterLayout(this, slotsCount, pages);
+			}
 			if (typeof recountUpgrades === "function") recountUpgrades(this);
 		},
 		pre_destroy: function () {
@@ -634,8 +1160,10 @@ function registerAdvancedCrafter(api, tier) {
 				isActive: this.data.isActive,
 				NETWORK_ID: this.data.NETWORK_ID,
 				redstone_mode: this.data.redstone_mode,
-				page: this.data.page || 0,
-				pages: pages
+				slots: slotsCount,
+				layoutVersion: this.data.layoutVersion,
+				pages: pages,
+				first: !!first
 			};
 			if (client) this.container.sendEvent(client, "openGui", _data);
 			else this.container.sendEvent("openGui", _data);
@@ -649,20 +1177,7 @@ function registerAdvancedCrafter(api, tier) {
 				coords: { x: this.x, y: this.y, z: this.z }
 			});
 		},
-		containerEvents: {
-			switchPatternPage: function (eventData, connectedClient) {
-				if (this.data.layoutVersion !== 2) {
-					RSE.log("advanced crafter page switch blocked: layoutVersion=" + this.data.layoutVersion + " requires migration");
-					return;
-				}
-				var direction = eventData ? eventData.dir : null;
-				if (typeof direction != 'number' || isNaN(direction) || Math.floor(direction) != direction || direction == 0) return;
-				direction = direction > 0 ? 1 : -1;
-				var currentPage = clampAdvancedCrafterPage(this.data.page, pages);
-				var newPage = clampAdvancedCrafterPage(currentPage + direction, pages);
-				this.switchPageTo(newPage, pages);
-			}
-		},
+		containerEvents: {},
 		client: {
 			load: function () {
 				this.refreshModel();
@@ -685,17 +1200,40 @@ function registerAdvancedCrafter(api, tier) {
 				openGui: function (container, window, content, eventData) {
 					if (!content || !window || !window.isOpened()) return;
 					if (!eventData) return;
-					var totalPages = Math.floor(Number(eventData.pages));
-					if (!isFinite(totalPages) || totalPages < 1) totalPages = pages;
-					var currentPage = clampAdvancedCrafterPage(eventData.page, totalPages);
-					layoutAdvancedCrafterElements(content, currentPage, slotsCount);
+					var layoutVersion = Number(eventData.layoutVersion);
+					if (!isFinite(layoutVersion) || layoutVersion !== RSE_ADVANCED_CRAFTER_LAYOUT_VERSION) {
+						RSE.log("advanced crafter GUI blocked: layout version " + eventData.layoutVersion + " requires " + RSE_ADVANCED_CRAFTER_LAYOUT_VERSION);
+						return;
+					}
+					if (!hasAdvancedCrafterStaticLayout(content)) {
+						RSE.log("advanced crafter GUI blocked: static viewport layout is incomplete");
+						return;
+					}
+					var patternSlotCount = Math.floor(Number(eventData.slots));
+					if (!isFinite(patternSlotCount) || patternSlotCount < 0) patternSlotCount = slotsCount;
+					if (patternSlotCount > RSE_CRAFTER_MAX_PATTERN_SLOTS) patternSlotCount = RSE_CRAFTER_MAX_PATTERN_SLOTS;
+					var totalPages = getAdvancedCrafterPageCount(patternSlotCount);
+					var currentPage = 0;
+					if (!eventData.first) {
+						var storedPage = Math.floor(Number(content.rseCurrentPatternPage));
+						if (isFinite(storedPage)) currentPage = clampAdvancedCrafterPage(storedPage, totalPages);
+					}
+					content.rseCrafterLayoutVersion = layoutVersion;
+					content.rsePatternSlotCount = patternSlotCount;
+					content.rsePatternPageCount = totalPages;
+					content.rseCurrentPatternPage = currentPage;
+
+					var mainWindow = typeof window.getWindow == "function" ? window.getWindow('main') : window;
+					if (!mainWindow) return;
+
+					// Descriptors are shared; each window gets positions for the current height.
+					applyAdvancedCrafterLivePositions(mainWindow, content);
+					applyAdvancedCrafterViewportVisibility(mainWindow, content, currentPage, patternSlotCount);
+
 					var redstoneModes = ["Ignore", "With signal", "Without signal"];
 					var redstoneMode = parseInt(eventData.redstone_mode, 10);
 					if (isNaN(redstoneMode)) redstoneMode = 0;
 					redstoneMode = Math.max(0, Math.min(2, redstoneMode));
-					if (content.elements["page_text"]) {
-						content.elements["page_text"].text = Translation.translate("Page") + ": " + (currentPage + 1) + " / " + totalPages;
-					}
 					if (content.elements["redstone_text"]) {
 						content.elements["redstone_text"].text = Translation.translate(redstoneModes[redstoneMode]);
 					}
@@ -706,8 +1244,9 @@ function registerAdvancedCrafter(api, tier) {
 						content.elements["status_text"].text = Translation.translate(eventData.isActive ? "Active" : "Offline");
 						content.elements["status_text"].font.color = eventData.isActive ? android.graphics.Color.DKGRAY : android.graphics.Color.RED;
 					}
-					updateAdvancedCrafterOutputSlots(container, content, currentPage);
-					window.getWindow('main').forceRefresh();
+
+					applyAdvancedCrafterViewportPage(container, mainWindow, content, currentPage, patternSlotCount);
+					if (mainWindow && typeof mainWindow.invalidateElements == "function") mainWindow.invalidateElements(false);
 				}
 			}
 		}

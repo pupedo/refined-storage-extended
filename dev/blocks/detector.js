@@ -87,16 +87,54 @@ var RSE_detectorSwap = {};
 var RSE_detectorSwapQueue = {};
 var RSE_detectorSwapLock = {};
 var RSE_detectorTouchQueue = [];
+var RSE_detectorRuntimeStates = {};
+var RSE_DETECTOR_TRANSIENT_FIELDS = [
+	"powered",
+	"noWorkTicks",
+	"swapGraceUntil",
+	"detectorCount",
+	"detectorStored",
+	"detectorGuiRefreshAt",
+	"detectorEventDirty",
+	"checkTick",
+	"logTick"
+];
 
 Callback.addCallback("LevelLeft", function () {
 	RSE_detectorSwapQueue = {};
 	RSE_detectorSwap = {};
 	RSE_detectorSwapLock = {};
 	RSE_detectorTouchQueue = [];
+	RSE_detectorRuntimeStates = {};
 });
 
 function detectorKey(tile) {
 	return (tile.dimension !== undefined ? tile.dimension : 0) + ":" + cts(tile);
+}
+
+function RSE_detectorRuntime(tile) {
+	var key = detectorKey(tile);
+	var runtime = RSE_detectorRuntimeStates[key];
+	if (!runtime) {
+		runtime = {
+			powered: false,
+			noWorkTicks: 0,
+			swapGraceUntil: 0,
+			detectorCount: 0,
+			detectorStored: 0,
+			detectorGuiRefreshAt: 0,
+			detectorEventDirty: false,
+			checkTick: 0,
+			logTick: 0
+		};
+		RSE_detectorRuntimeStates[key] = runtime;
+	}
+	return runtime;
+}
+
+function RSE_detectorResetRuntime(tile) {
+	delete RSE_detectorRuntimeStates[detectorKey(tile)];
+	return RSE_detectorRuntime(tile);
 }
 
 function RSE_detectorChunkLoaded(region, x, y, z) {
@@ -512,6 +550,7 @@ var detectorGUI = new UI.StandartWindow({
 });
 
 function RSE_evaluateDetector(tile, api) {
+	var runtime = RSE_detectorRuntime(tile);
 	tile.data.mode = RSE_normalizeDetectorMode(tile.data.mode);
 	tile.data.amount = RSE_normalizeDetectorAmount(tile.data.amount);
 	var detectorRefreshMode = (Config.detector && Config.detector.refreshMode) || 'poll';
@@ -549,14 +588,14 @@ function RSE_evaluateDetector(tile, api) {
 			}
 		}
 		powered = detectorIsPowered(count, tile.data.mode, tile.data.amount || 0);
-		tile.data.noWorkTicks = 0;
+		runtime.noWorkTicks = 0;
 	} else {
-		tile.data.noWorkTicks = (tile.data.noWorkTicks || 0) + 5;
-		if (isOnBlock && tile.data.swapGraceUntil && RSE_detectorNowTicks() < tile.data.swapGraceUntil) powered = true;
+		runtime.noWorkTicks = (runtime.noWorkTicks || 0) + 5;
+		if (isOnBlock && runtime.swapGraceUntil && RSE_detectorNowTicks() < runtime.swapGraceUntil) powered = true;
 	}
-	var poweredChanged = powered != tile.data.powered;
+	var poweredChanged = powered != runtime.powered;
 	if (poweredChanged) {
-		tile.data.powered = powered;
+		runtime.powered = powered;
 		tile.networkData.putBoolean('powered', powered);
 		RSE.logDev("[detector] powered changed -> " + powered);
 	}
@@ -580,29 +619,29 @@ function RSE_evaluateDetector(tile, api) {
 			RSE.log("[detector] swap queued " + (isOnBlock ? "ON->OFF" : "OFF->ON") + " (filter=" + filterSlot.id + ")");
 		}
 	}
-	var detectorLogDue = ((tile.data.logTick || 0) + 5) % 200 == 0;
+	var detectorLogDue = ((runtime.logTick || 0) + 5) % 200 == 0;
 	var detectorStoredValue = null;
 	var detectorStoredAvailable = !!(api.networks && typeof api.networks.getStored == 'function');
 	if (detectorHasClients || detectorLogDue) {
 		detectorStoredValue = detectorStoredAvailable ? (api.networks.getStored(tile.data.NETWORK_ID) || 0) : -1;
 	}
-	tile.data.detectorCount = count;
-	tile.data.detectorStored = detectorHasClients && detectorStoredAvailable ? (detectorStoredValue || 0) : 0;
+	runtime.detectorCount = count;
+	runtime.detectorStored = detectorHasClients && detectorStoredAvailable ? (detectorStoredValue || 0) : 0;
 	if (detectorHasClients) {
 		var detectorNow = RSE_detectorNowTicks();
-		if (poweredChanged && detectorNow >= (tile.data.detectorGuiRefreshAt || 0)) {
-			tile.data.detectorGuiRefreshAt = detectorNow + 10;
+		if (poweredChanged && detectorNow >= (runtime.detectorGuiRefreshAt || 0)) {
+			runtime.detectorGuiRefreshAt = detectorNow + 10;
 			if (typeof tile.refreshGui == 'function') tile.refreshGui();
-		} else if (detectorNow >= (tile.data.detectorGuiRefreshAt || 0)) {
-			tile.data.detectorGuiRefreshAt = detectorNow + 20;
+		} else if (detectorNow >= (runtime.detectorGuiRefreshAt || 0)) {
+			runtime.detectorGuiRefreshAt = detectorNow + 20;
 			if (typeof tile.refreshGui == 'function') tile.refreshGui();
 		}
 	}
-	tile.data.logTick = (tile.data.logTick || 0) + 5;
-	if (tile.data.logTick % 200 == 0) {
+	runtime.logTick = (runtime.logTick || 0) + 5;
+	if (runtime.logTick % 200 == 0) {
 		var logFilter = tile.container.getSlot('slot_filter');
-		var loggedStored = detectorStoredValue !== null ? (detectorHasClients && detectorStoredAvailable ? tile.data.detectorStored : detectorStoredValue) : -1;
-		RSE.logDev("[detector] powered=" + powered + " count=" + count + " mode=" + tile.data.mode + " amount=" + (tile.data.amount || 0) + " noWorkTicks=" + (tile.data.noWorkTicks || 0) + " active=" + !!tile.data.isActive + " net=" + tile.data.NETWORK_ID + " onBlock=" + isOnBlock + " filter=" + (logFilter ? logFilter.id : 0) + " stored=" + loggedStored + " itemsLen=" + (items ? items.length : -1));
+		var loggedStored = detectorStoredValue !== null ? (detectorHasClients && detectorStoredAvailable ? runtime.detectorStored : detectorStoredValue) : -1;
+		RSE.logDev("[detector] powered=" + powered + " count=" + count + " mode=" + tile.data.mode + " amount=" + (tile.data.amount || 0) + " noWorkTicks=" + (runtime.noWorkTicks || 0) + " active=" + !!tile.data.isActive + " net=" + tile.data.NETWORK_ID + " onBlock=" + isOnBlock + " filter=" + (logFilter ? logFilter.id : 0) + " stored=" + loggedStored + " itemsLen=" + (items ? items.length : -1));
 	}
 }
 
@@ -615,14 +654,7 @@ function buildDetectorParams(api) {
 			redstone_mode: 0,
 			redstone_power: false,
 			mode: DETECTOR_MODE_UNDER,
-			amount: 0,
-			powered: false,
-			noWorkTicks: 0,
-			swapGraceUntil: 0,
-			detectorCount: 0,
-			detectorStored: 0,
-			detectorGuiRefreshAt: 0,
-			detectorEventDirty: false
+			amount: 0
 		},
 		click: function (id, count, data, coords, player, extra) {
 			if (Entity.getSneaking(player)) return false;
@@ -636,7 +668,14 @@ function buildDetectorParams(api) {
 			return detectorGUI;
 		},
 		pre_init: function () {
+			for (var transientIndex = 0; transientIndex < RSE_DETECTOR_TRANSIENT_FIELDS.length; transientIndex++) {
+				var transientField = RSE_DETECTOR_TRANSIENT_FIELDS[transientIndex];
+				if (Object.prototype.hasOwnProperty.call(this.data, transientField)) {
+					delete this.data[transientField];
+				}
+			}
 			var key = detectorKey(this);
+			var runtime = RSE_detectorResetRuntime(this);
 			var saved = RSE_detectorSwap[key];
 			var restoreSucceeded = !saved;
 			if (saved) {
@@ -656,7 +695,7 @@ function buildDetectorParams(api) {
 					}
 					restoreSucceeded = true;
 					delete RSE_detectorSwap[key];
-					this.data.swapGraceUntil = RSE_detectorNowTicks() + 40;
+					runtime.swapGraceUntil = RSE_detectorNowTicks() + 40;
 					RSE.logDev("[detector] state restored after swap (mode=" + this.data.mode + " amount=" + this.data.amount + ")");
 				} catch (e) {
 					RSE.log("[detector] state restore error: " + e);
@@ -670,17 +709,19 @@ function buildDetectorParams(api) {
 				} catch (e) {
 					RSE.log("[detector] pre_init block check error: " + e);
 				}
-				this.data.swapGraceUntil = isOnDetectorBlock ? RSE_detectorNowTicks() + 40 : 0;
+				runtime.swapGraceUntil = isOnDetectorBlock ? RSE_detectorNowTicks() + 40 : 0;
 			}
 			this.data.mode = RSE_normalizeDetectorMode(this.data.mode);
 			this.data.amount = RSE_normalizeDetectorAmount(this.data.amount);
-			this.data.detectorGuiRefreshAt = 0;
+			runtime.detectorGuiRefreshAt = 0;
 			var tile = this;
 			if (typeof api.on === 'function' && !this.detectorEventUnsubscribers) {
 				var markDetectorEventDirty = function (event) {
 					if (event && event.netId === tile.data.NETWORK_ID) {
-						tile.data.detectorEventDirty = true;
-						tile.data.checkTick = 0;
+						var eventRuntime = RSE_detectorRuntimeStates[detectorKey(tile)];
+						if (!eventRuntime) return;
+						eventRuntime.detectorEventDirty = true;
+						eventRuntime.checkTick = 0;
 					}
 				};
 				this.detectorEventUnsubscribers = [
@@ -754,6 +795,7 @@ function buildDetectorParams(api) {
 			} catch (e) {
 				RSE.log("[detector] filter slot clear error: " + e);
 			} finally {
+				delete RSE_detectorRuntimeStates[key];
 				delete RSE_detectorSwapQueue[key];
 				if (!RSE_detectorSwapLock[key]) delete RSE_detectorSwap[key];
 				var remainingTouches = [];
@@ -769,12 +811,13 @@ function buildDetectorParams(api) {
 			}
 		},
 		tick: function () {
-			if (this.data.detectorEventDirty) {
-				this.data.detectorEventDirty = false;
-				this.data.checkTick = 4;
+			var runtime = RSE_detectorRuntime(this);
+			if (runtime.detectorEventDirty) {
+				runtime.detectorEventDirty = false;
+				runtime.checkTick = 4;
 			}
-			this.data.checkTick = ((this.data.checkTick || 0) + 1) % 5;
-			if (this.data.checkTick != 0) return;
+			runtime.checkTick = ((runtime.checkTick || 0) + 1) % 5;
+			if (runtime.checkTick != 0) return;
 			try {
 				RSE_evaluateDetector(this, api);
 			} catch (e) {
@@ -782,14 +825,15 @@ function buildDetectorParams(api) {
 			}
 		},
 		refreshGui: function (first, client) {
+			var runtime = RSE_detectorRuntime(this);
 			var _data = {
 				name: this.networkData.getName() + '',
 				mode: RSE_normalizeDetectorMode(this.data.mode),
 				amount: RSE_normalizeDetectorAmount(this.data.amount),
-				powered: !!this.data.powered,
+				powered: !!runtime.powered,
 				isActive: !!this.data.isActive,
 				NETWORK_ID: this.data.NETWORK_ID,
-				count: this.data.detectorCount || 0
+				count: runtime.detectorCount || 0
 			};
 			if (client) this.container.sendEvent(client, "openGui", _data);
 			else this.container.sendEvent("openGui", _data);
